@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: default
+  labels:
+    app: web-app
+spec:
+  replicas: 2 # количество подов для нормальной нагрузки
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      affinity: # использую поле решение особенности мультизонального кластера
+        podAntiAffinity: # поды с одинаковой меткой не будут размещаться на одной зоне 
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: web-app
+              topologyKey: "topology.kubernetes.io/zone" # ключ для определения зоны
+      containers:
+      - name: web-app-container
+        image: hashicorp/http-echo:latest # простой образ веб-сервера на базе Nginx, который возвращает HTML-страницу с информацией о запросе
+        resources:
+            requests: # минимальные ресурсы, которые будут выделены контейнру
+              memory: "128Mi" # минимальный объем памяти
+              cpu: "0.1" # уровень CPU для обычной работы
+            limits: # максимальные ресурсы, которые может использовать контейнер 
+              memory: "128Mi" # ограничение по памяти
+              cpu: "0.5" # максимум для обработки пикового потребления
+        readinessProbe: # проверка готовности для управления трафиком, использую поле для условия 5-10 секунд инициализация прилажения
+            httpGet:
+              path: /healthz # стандартный путь, где приложение сообщает о своем состоянии
+              port: 80
+            initialDelaySeconds: 10 # даю приложению 10 секунд для старта
+            periodSeconds: 5 # проверка готовности каждые 5 секунд
+        livenessProbe: # проверка функционирования пода
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 15 # задаю 15 секунд, чтобы избежать перезапуска во время инициализации
+            periodSeconds: 10 # проверяю живость каждые 10 секунд
+        env: # использую переменную окружения для решения задачи с дневным и ночным циклом, предполагая что данная логика присутствует приложении
+            - name: TZ # переменная с временной зоной UTC
+              value: Europe/Moscow # задаем временную зону
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-app-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  minReplicas: 2 # минимальное количество подов для ночного времени
+  maxReplicas: 4 # максимальное количество подов для пиковой нагрузки
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50 # автоскейлинг по CPU, если средняя загрузка превышает 50%
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-app-pdb
+  namespace: default
+spec:
+  minAvailable: 2 # минимум 2 пода должны быть всегда доступны
+  selector:
+    matchLabels:
+      app: web-app
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web-app-ingress
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules: # если запрос приходит на web-app.exemple.com, с путем начинающимся с /, он перенаплавляется в сервис web-app-service на порт 80
+    - host: web-app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-app-service
+                port:
+                  number: 80
+---
+apiVersion: v1
+kind: Service # предосталвяет доступ к подам
+metadata:
+  name: web-app-service
+  namespace: default
+spec:
+  selector:
+    app: web-app
+  ports:
+    - protocol: TCP # проброс портов
+      port: 80
+      targetPort: 80
+  type: ClusterIP
