@@ -24,7 +24,7 @@ spec:
               topologyKey: "topology.kubernetes.io/zone" # ключ для определения зоны
       containers:
       - name: web-app-container
-        image: hashicorp/http-echo:latest # простой образ веб-сервера на базе Nginx, который возвращает HTML-страницу с информацией о запросе
+        image: hashicorp/http-echo:latest # простой образ, который возвращает статический текст для любого HTTP-запроса
         resources:
             requests: # минимальные ресурсы, которые будут выделены контейнру
               memory: "128Mi" # минимальный объем памяти
