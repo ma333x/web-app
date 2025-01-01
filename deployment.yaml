@@ -6,7 +6,7 @@ metadata:
   labels:
     app: web-app
 spec:
-  replicas: 2 # количество подов для нормальной нагрузки
+  replicas: 2 # начальное количество подов для минимальной нагрузки
   selector:
     matchLabels:
       app: web-app
@@ -15,72 +15,80 @@ spec:
       labels:
         app: web-app
     spec:
-      affinity: # использую поле решение особенности мультизонального кластера
-        podAntiAffinity: # поды с одинаковой меткой не будут размещаться на одной зоне 
+      affinity: # использую данное поле для решения условия особенности мультизонального кластера
+        podAntiAffinity: # распределяю поды по зонам для отказоустойчивости
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
                   app: web-app
               topologyKey: "topology.kubernetes.io/zone" # ключ для определения зоны
       containers:
-      - name: web-app-container
-        image: hashicorp/http-echo:latest # простой образ, который возвращает статический текст для любого HTTP-запроса
-        resources:
+        - name: web-app-container
+          image: ashicorp/http-echo:latest # простой образ, который возвращает статический текст для любого HTTP-запроса
+          resources:
             requests: # минимальные ресурсы, которые будут выделены контейнру
               memory: "128Mi" # минимальный объем памяти
               cpu: "0.1" # уровень CPU для обычной работы
             limits: # максимальные ресурсы, которые может использовать контейнер 
               memory: "128Mi" # ограничение по памяти
               cpu: "0.5" # максимум для обработки пикового потребления
-        readinessProbe: # проверка готовности для управления трафиком, использую поле для условия 5-10 секунд инициализация прилажения
+          readinessProbe: # проверка готовности для управления трафиком, использую поле для условия 5-10 секунд инициализация прилажения
             httpGet:
-              path: /healthz # стандартный путь, где приложение сообщает о своем состоянии
+              path: /healthz
               port: 80
             initialDelaySeconds: 10 # даю приложению 10 секунд для старта
             periodSeconds: 5 # проверка готовности каждые 5 секунд
-        livenessProbe: # проверка функционирования пода
+          livenessProbe: # проверка функционирования пода
             httpGet:
               path: /healthz
               port: 80
             initialDelaySeconds: 15 # задаю 15 секунд, чтобы избежать перезапуска во время инициализации
             periodSeconds: 10 # проверяю живость каждые 10 секунд
-        env: # использую переменную окружения для решения задачи с дневным и ночным циклом, предполагая что данная логика присутствует приложении
-            - name: TZ # переменная с временной зоной UTC
+          env:
+            - name: TZ # устанавливаю временную зону
               value: Europe/Moscow # задаем временную зону
 ---
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+apiVersion: batch/v1
+kind: CronJob # через данный контроллер решаю задачу с маштабирование в ночное и дневное время
 metadata:
-  name: web-app-hpa
+  name: scale-up-web-app
   namespace: default
 spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: web-app
-  minReplicas: 2 # минимальное количество подов для ночного времени
-  maxReplicas: 4 # максимальное количество подов для пиковой нагрузки
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 50 # автоскейлинг по CPU, если средняя загрузка превышает 50%
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
+  schedule: "0 8 * * *" # запуск каждый день в 8 утра
+  jobTemplate: # шаблон для задания, которое будет выполнено по расписанию
+    spec:
+      template:
+        spec:
+          containers:
+            - name: scaler
+              image: bitnami/kubectl:latest # контейнер с утилитой kubectl
+              command:
+                - /bin/sh
+                - -c # запуск оболочки для выполнения команды
+                - kubectl scale deployment web-app --replicas=4 # масштабирование Deployment web-app, с количеством подов равным 4
+          restartPolicy: OnFailure # перезапуск при неудачном выполнении задания
+apiVersion: batch/v1
+kind: CronJob
 metadata:
-  name: web-app-pdb
+  name: scale-down-web-app
   namespace: default
 spec:
-  minAvailable: 2 # минимум 2 пода должны быть всегда доступны
-  selector:
-    matchLabels:
-      app: web-app
+  schedule: "0 22 * * *" # запуск каждый день в 22:00
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: scaler
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - kubectl scale deployment web-app --replicas=2 # уменьшение до 2
+          restartPolicy: OnFailure # перезапуск в случае сбоя
 ---
 apiVersion: networking.k8s.io/v1
-kind: Ingress
+kind: Ingress # маршрутизация внешнего трафика на сервис
 metadata:
   name: web-app-ingress
   namespace: default
@@ -88,19 +96,19 @@ metadata:
     nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
   rules: # если запрос приходит на web-app.exemple.com, с путем начинающимся с /, он перенаплавляется в сервис web-app-service на порт 80
-    - host: web-app.example.com
+    - host: web-app.example.com # определение доменного имени
       http:
         paths:
           - path: /
             pathType: Prefix
-            backend:
+            backend: # конечный сервис, к которому направляется трафик
               service:
                 name: web-app-service
                 port:
                   number: 80
 ---
 apiVersion: v1
-kind: Service # предосталвяет доступ к подам
+kind: Service # предоставление доступа к подам имеющим метку web-app
 metadata:
   name: web-app-service
   namespace: default
